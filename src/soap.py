@@ -109,6 +109,11 @@ def envelope(*body_children) -> bytes:
 def fault(reason: str, subcode: str = "ter:ActionNotSupported", sender: bool = True) -> bytes:
     """Build a SOAP 1.2 fault. The ONVIF client raises it as an exception."""
     root = ElementTree.Element(qname(SOAP_ENV, "Envelope"))
+    # The subcode is a QName carried as element text. ElementTree only declares
+    # a prefix it sees in a tag or an attribute name, never one inside text, so
+    # bind ter here by hand. Without this the client fails to parse the fault
+    # and raises a parse error instead of the fault itself.
+    root.set("xmlns:ter", TER)
     body = ElementTree.SubElement(root, qname(SOAP_ENV, "Body"))
     fault_element = ElementTree.SubElement(body, qname(SOAP_ENV, "Fault"))
 

@@ -1,0 +1,92 @@
+# dvrip-onvif: the ONVIF PTZ shim for the bedroom camera.
+#
+# This is the commented source of the Dokploy compose. Dokploy parses the YAML,
+# injects its own labels and writes it back, and that rewrite drops every
+# comment, so this file is where the reasoning lives. Read
+# ~/desk/docs/20-services/bedroom-camera-ptz.md as well.
+#
+# WHY THERE IS NO BUILD STEP: every file this service runs is stdlib Python, so
+# a pinned upstream image plus two read only bind mounts is the whole thing.
+# That is the same shape Frigate uses: a pinned public image and a bind mount
+# for the parts this house wrote.
+
+services:
+  ptz:
+    # Pinned by digest, because a moving tag would change the interpreter under
+    # a service that nothing else pins.
+    image: python@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36
+    container_name: dvrip-onvif
+    restart: unless-stopped
+    # Runs as onesc. The go2rtc config it reads is mode 600 and owned by uid
+    # 1000, and nothing here needs root.
+    user: "1000:1000"
+    mem_limit: 128m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+    # BOTH CHECKOUTS ARE LOAD BEARING AND BOTH ARE MOUNTED READ ONLY.
+    #
+    # ~/src/python-dvr carries the dvrip library with this house's single byte
+    # terminator patch, without which no login to this camera succeeds. It is
+    # the single source of truth for the protocol, so this service mounts it
+    # instead of holding a second copy.
+    #
+    # ~/src/dvrip-onvif/src is this service's own code.
+    #
+    # The go2rtc config is the single source of truth for the camera login.
+    # camenv.py parses the login out of the dvrip URL in it, so no second copy
+    # of that password exists anywhere.
+    volumes:
+      - /home/onesc/src/python-dvr:/opt/python-dvr:ro
+      - /home/onesc/src/dvrip-onvif/src:/opt/dvrip-onvif:ro
+      - /mnt/storage/go2rtc/go2rtc.yaml:/config/go2rtc.yaml:ro
+      # The shim's own password, mode 600. It is a file and not an environment
+      # variable because `docker inspect` and the Dokploy API both print the
+      # environment of a service in plain text.
+      - /mnt/storage/dvrip-onvif/onvif-password:/config/onvif-password:ro
+      - /etc/localtime:/etc/localtime:ro
+
+    environment:
+      PYTHONPATH: /opt/dvrip-onvif:/opt/python-dvr
+      # The source mounts are read only, so byte code would fail to write.
+      PYTHONDONTWRITEBYTECODE: "1"
+      GO2RTC_CONFIG: /config/go2rtc.yaml
+      # This credential guards the shim. It is NOT the camera login. Frigate
+      # holds the matching pair in its own config.yml.
+      ONVIF_USERNAME: frigate
+      ONVIF_PASSWORD_FILE: /config/onvif-password
+      # The watchdog. No press may run the motors longer than this, whatever
+      # the client does or fails to do. Read the note in src/motion.py.
+      PTZ_MAX_MOVE_SECONDS: "8"
+
+    command: ["python3", "-u", "/opt/dvrip-onvif/server.py"]
+
+    security_opt:
+      - no-new-privileges:true
+
+    healthcheck:
+      # The health endpoint reads the worker's own state and touches no camera.
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/healthz',timeout=5)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    # default carries the outbound path to the camera on the LAN.
+    # dokploy-network is how Frigate reaches this service, by container name.
+    # There is no Traefik label and no domain on purpose: this service has no
+    # UI, and nothing outside the Docker networks should reach it.
+    networks:
+      - default
+      - dokploy-network
+
+networks:
+  dokploy-network:
+    external: true
